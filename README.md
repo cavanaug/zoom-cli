@@ -34,6 +34,7 @@ zoom-cli download "/Team-Standup/*/" ~/summaries/ --since 7d
 - **[CLI-DESIGN.md](./CLI-DESIGN.md)** - Command usage, syntax, and workflows
 - **[API-REFERENCE.md](./API-REFERENCE.md)** - Zoom API integration details
 - **[IMPLEMENTATION.md](./IMPLEMENTATION.md)** - Development guide and architecture
+- **[MARKETPLACE.md](./MARKETPLACE.md)** - Field-by-field Zoom Marketplace setup and PKCE appendix
 
 ## Quick Start
 
@@ -64,9 +65,27 @@ Create `~/.config/zoom-cli/config.yaml`:
 ```yaml
 auth:
   client_id: "your-zoom-client-id"
-  client_secret: "your-zoom-client-secret"
-  redirect_url: "http://localhost:8080/callback"
+  redirect_url: "http://localhost:53682/callback"
+  redirect_urls:
+    - "http://localhost:53682/callback"
+    - "http://localhost:53683/callback"
+    - "http://localhost:53684/callback"
 ```
+
+If your Zoom app configuration requires confidential token exchange, add:
+
+```yaml
+auth:
+  client_id: "your-zoom-client-id"
+  client_secret: "your-zoom-client-secret"
+  redirect_url: "http://localhost:53682/callback"
+  redirect_urls:
+    - "http://localhost:53682/callback"
+    - "http://localhost:53683/callback"
+    - "http://localhost:53684/callback"
+```
+
+Add each callback URL in `redirect_urls` to your Zoom Marketplace OAuth redirect allow list. During `auth login`, the CLI uses the first port that is available.
 
 ### Authentication
 

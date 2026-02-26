@@ -10,6 +10,7 @@ This document describes the **Zoom API integration** for `zoom-cli`, including O
 For related documentation, see:
 - **[IMPLEMENTATION.md](./IMPLEMENTATION.md)** - Technology stack, project structure, and development guide
 - **[CLI-DESIGN.md](./CLI-DESIGN.md)** - User-facing command documentation and workflows
+- **[MARKETPLACE.md](./MARKETPLACE.md)** - Zoom Marketplace field-by-field setup with engineering appendix
 
 ---
 
@@ -28,19 +29,28 @@ For related documentation, see:
 
 ## OAuth 2.0 Authentication
 
-### Authorization Code Grant Flow
+### Authorization Code Grant Flow (PKCE for CLI)
 
-`zoom-cli` uses the **Authorization Code Grant** flow for OAuth 2.0:
+`zoom-cli` uses **Authorization Code Grant with PKCE** as the primary OAuth 2.0 flow for local CLI authentication.
+
+Why this flow:
+- Works for user-run local clients that open a browser for consent.
+- Avoids embedding long-lived app secrets in distributed binaries.
+- Keeps user tokens on the user's machine (no backend token broker required).
+
+Compatibility note:
+- Zoom OAuth docs include PKCE parameters (`code_challenge`, `code_challenge_method`, `code_verifier`) as supported parameters.
+- Depending on exact Marketplace app/client configuration, token exchange may still require confidential-client authentication. Validate your specific app configuration during setup.
 
 **Flow Diagram**:
 ```
 1. User runs: zoom-cli auth login
-2. CLI generates authorization URL
-3. CLI opens browser to: https://zoom.us/oauth/authorize?...
-4. CLI starts local HTTP server on localhost:8080
+2. CLI generates PKCE values (`code_verifier`, `code_challenge`) and `state`
+3. CLI starts local HTTP callback server on first available configured callback port
+4. CLI opens browser to: https://zoom.us/oauth/authorize?...
 5. User authorizes application in browser
-6. Zoom redirects to: http://localhost:8080/callback?code=AUTH_CODE
-7. CLI exchanges AUTH_CODE for tokens
+6. Zoom redirects to selected callback URL, for example: http://localhost:53682/callback?code=AUTH_CODE&state=STATE
+7. CLI validates `state` and exchanges AUTH_CODE + `code_verifier` for tokens
 8. CLI stores access_token + refresh_token securely
 ```
 
@@ -57,10 +67,25 @@ For related documentation, see:
 https://zoom.us/oauth/authorize?
   response_type=code&
   client_id={CLIENT_ID}&
-  redirect_uri=http://localhost:8080/callback
+  redirect_uri={SELECTED_ALLOWLISTED_REDIRECT_URI}&
+  state={RANDOM_CSRF_STATE}&
+  code_challenge={BASE64URL_SHA256_CODE_VERIFIER}&
+  code_challenge_method=S256
 ```
 
-### Token Exchange Request
+### Redirect URI and Port Strategy (CLI)
+
+PKCE improves client security, but it does not bypass redirect URI validation. The redirect URI still needs to match a URI configured in Zoom Marketplace.
+
+Recommended strategy:
+- Register a small fixed set of loopback callback URLs in Marketplace (for example: `http://localhost:53682/callback`, `http://localhost:53683/callback`, `http://localhost:53684/callback`).
+- Configure the same ordered list in CLI config.
+- At login, bind the first available configured port and use that exact redirect URI in authorize and token requests.
+- If no configured callback ports are available, fail with an actionable error.
+
+Avoid relying on fully random ephemeral ports unless your provider explicitly supports wildcard/any-port loopback redirect validation.
+
+### Token Exchange Request (PKCE)
 
 ```http
 POST https://zoom.us/oauth/token
@@ -68,9 +93,23 @@ Content-Type: application/x-www-form-urlencoded
 
 grant_type=authorization_code&
 code={AUTH_CODE}&
-redirect_uri=http://localhost:8080/callback&
+redirect_uri={SELECTED_ALLOWLISTED_REDIRECT_URI}&
 client_id={CLIENT_ID}&
-client_secret={CLIENT_SECRET}
+code_verifier={ORIGINAL_CODE_VERIFIER}
+```
+
+### Token Exchange Request (Confidential Fallback)
+
+If your app configuration enforces confidential-client auth, Zoom may require client authentication (for example, HTTP Basic auth with `client_id:client_secret`) during token exchange.
+
+```http
+POST https://zoom.us/oauth/token
+Authorization: Basic {BASE64_CLIENT_ID_COLON_CLIENT_SECRET}
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code&
+code={AUTH_CODE}&
+redirect_uri={SELECTED_ALLOWLISTED_REDIRECT_URI}
 ```
 
 ### Token Exchange Response
@@ -93,9 +132,10 @@ Content-Type: application/x-www-form-urlencoded
 
 grant_type=refresh_token&
 refresh_token={REFRESH_TOKEN}&
-client_id={CLIENT_ID}&
-client_secret={CLIENT_SECRET}
+client_id={CLIENT_ID}
 ```
+
+If confidential-client auth is required by your app configuration, include client authentication the same way as token exchange.
 
 ---
 
@@ -194,6 +234,16 @@ https://api.zoom.us/v2
 4. **Token Invalidation**:
    - If refresh fails (401, invalid_grant), clear tokens
    - Prompt user to run `zoom-cli auth login` again
+
+### CLI Auth Implementation Requirements
+
+- Generate `code_verifier` (high entropy) per login attempt.
+- Derive `code_challenge` using SHA-256 and Base64URL encoding.
+- Generate and validate `state` to prevent CSRF attacks.
+- Bind callback listener to `127.0.0.1` only (not `0.0.0.0`).
+- Enforce callback timeout and single-use auth session.
+- Never log access/refresh tokens, auth code, or verifier values.
+- Store tokens in user-local secure storage (current implementation target: config dir file with strict permissions; future enhancement: OS keychain).
 
 ### Token Refresh Implementation
 
@@ -488,14 +538,25 @@ Authorization: Bearer {ACCESS_TOKEN}
    - App name: `zoom-cli`
    - Short description: CLI tool for managing Zoom meetings
    - Company name: Your name
-5. Set **Redirect URL for OAuth**: `http://localhost:8080/callback`
-6. Add **Scopes**:
+5. Set **Redirect URL for OAuth**: `http://localhost:53682/callback`
+6. Configure OAuth redirect allow list entries that exactly match your callback URL(s)
+   - Recommended: add a small fallback set, such as:
+     - `http://localhost:53682/callback`
+     - `http://localhost:53683/callback`
+     - `http://localhost:53684/callback`
+7. Use PKCE-enabled authorization requests from the CLI (`code_challenge_method=S256`)
+8. Add **Scopes**:
    - `meeting:read`
    - `meeting_summary:read`
    - `recording:read`
    - `user:read`
-7. Copy **Client ID** and **Client Secret**
-8. Add credentials to config file (`~/.config/zoom-cli/config.yaml`)
+9. Copy **Client ID** (and `Client Secret` only if your app config requires confidential auth)
+10. Add credentials to config file (`~/.config/zoom-cli/config.yaml`)
+
+**Recommended for distributed CLI apps**:
+- Prefer PKCE-based local-client flow so user tokens remain on user devices.
+- Do not embed a global `client_secret` in distributed binaries.
+- If your app config requires confidential token exchange and PKCE-only is not possible, use a backend broker or separate per-user app credentials.
 
 ### Complete API Flow Example
 

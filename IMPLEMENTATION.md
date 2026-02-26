@@ -10,6 +10,7 @@ This document focuses on **implementation design decisions** for `zoom-cli`, inc
 For user-facing documentation, see:
 - **[CLI-DESIGN.md](./CLI-DESIGN.md)** - Command usage, syntax, configuration, and workflows
 - **[API-REFERENCE.md](./API-REFERENCE.md)** - Zoom API integration details and OAuth implementation
+- **[MARKETPLACE.md](./MARKETPLACE.md)** - Zoom Marketplace field-by-field setup guide with engineering appendix
 
 ---
 
@@ -167,8 +168,10 @@ zoom-cli/
   ```
 - [ ] Implement OAuth 2.0 authorization code flow (`internal/auth/oauth.go`)
   - Browser launch for authorization
-  - Local HTTP callback server (`localhost:8080`)
-  - Token exchange
+  - Local HTTP callback server using first available configured callback URL
+  - PKCE generation (`code_verifier`, `code_challenge`, `S256`)
+  - `state` generation and validation
+  - Token exchange with PKCE (`code_verifier`)
 - [ ] Implement token storage (`internal/auth/token.go`)
   - Secure storage: `~/.config/zoom-cli/tokens.json` with `0600` permissions
   - Auto-refresh mechanism (refresh 5 min before expiration)
@@ -190,6 +193,7 @@ zoom-cli/
 
 **Success Criteria**:
 - ✓ Can authenticate via browser OAuth flow
+- ✓ PKCE flow works with state validation and local callback
 - ✓ Tokens stored securely and auto-refresh
 - ✓ Config file created and managed
 - ✓ `auth status` and `whoami` display user info
@@ -440,6 +444,8 @@ go build -o zoom-cli main.go
 
 ### OAuth App Setup
 
+For the complete field-by-field Marketplace setup guide and engineering appendix, see **[MARKETPLACE.md](./MARKETPLACE.md)**.
+
 1. Go to [Zoom Marketplace](https://marketplace.zoom.us/)
 2. Click **Develop** → **Build App**
 3. Select **User-managed app** (OAuth)
@@ -447,20 +453,74 @@ go build -o zoom-cli main.go
    - App name: `zoom-cli`
    - Short description: CLI tool for managing Zoom meetings
    - Company name: Your name
-5. Set **Redirect URL for OAuth**: `http://localhost:8080/callback`
-6. Add **Scopes**:
+5. Set **Redirect URL for OAuth**: `http://localhost:53682/callback`
+6. Add matching OAuth allow list entries for callback URL(s)
+   - Recommended fallback set:
+     - `http://localhost:53682/callback`
+     - `http://localhost:53683/callback`
+     - `http://localhost:53684/callback`
+7. Ensure CLI auth requests include PKCE parameters (`code_challenge_method=S256`)
+8. Add **Scopes**:
    - `meeting:read` - List and view meetings
    - `meeting_summary:read` - Access AI summaries
    - `recording:read` - List and download recordings
    - `user:read` - Get user profile information
-7. Copy **Client ID** and **Client Secret**
-8. Create config file (`~/.config/zoom-cli/config.yaml`):
+9. Copy **Client ID** (and `Client Secret` only if app configuration requires confidential token exchange)
+10. Create config file (`~/.config/zoom-cli/config.yaml`):
    ```yaml
-   auth:
-     client_id: "your-client-id-here"
-     client_secret: "your-client-secret-here"
-     redirect_url: "http://localhost:8080/callback"
-   ```
+    auth:
+      client_id: "your-client-id-here"
+      redirect_url: "http://localhost:53682/callback"
+      redirect_urls:
+        - "http://localhost:53682/callback"
+        - "http://localhost:53683/callback"
+        - "http://localhost:53684/callback"
+    ```
+
+If your app configuration requires confidential-client token exchange, include:
+
+```yaml
+auth:
+  client_id: "your-client-id-here"
+  client_secret: "your-client-secret-here"
+  redirect_url: "http://localhost:53682/callback"
+  redirect_urls:
+    - "http://localhost:53682/callback"
+    - "http://localhost:53683/callback"
+    - "http://localhost:53684/callback"
+```
+
+### CLI OAuth Implementation Details
+
+`zoom-cli` should implement the following auth components in Phase 0:
+
+- `internal/auth/pkce.go`
+  - Generate RFC 7636 `code_verifier` (43-128 chars, high entropy)
+  - Derive `code_challenge` with SHA-256 + Base64URL
+- `internal/auth/oauth.go`
+  - Build authorize URL with `response_type=code`, `client_id`, selected `redirect_uri`, `state`, `code_challenge`, `code_challenge_method=S256`
+  - Start loopback callback listener on first available configured callback URL
+  - Validate callback `state`, extract auth `code`, enforce single-use callback
+  - Exchange code with token endpoint using PKCE and selected `redirect_uri`
+- `internal/auth/token.go`
+  - Persist token set with strict file mode `0600`
+  - Refresh automatically before expiration
+  - Clear tokens and return actionable error on `invalid_grant`
+- `cmd/auth.go`
+  - `auth login`: browser launch + callback wait + success/failure UX
+  - `auth status` / `auth whoami`: display token/session status
+  - `auth logout`: clear local credentials and optionally revoke token
+
+Security requirements:
+- Bind callback server to loopback only (`127.0.0.1`, not `0.0.0.0`).
+- Enforce callback timeout (recommended: 120 seconds).
+- Never log token values, auth code, `code_verifier`, or `client_secret`.
+- Use least-privilege scopes.
+
+Port selection requirements:
+- Only use redirect URIs pre-registered in Zoom Marketplace.
+- Try configured callback URLs in order; choose first bindable port.
+- If none are available, fail with a clear actionable error.
 
 ### Development Workflow
 
@@ -540,6 +600,9 @@ func TestNormalizeName(t *testing.T) {
 
 **Key Scenarios**:
 - OAuth flow (mock authorization and token exchange)
+- PKCE mismatch (`code_verifier`/`code_challenge` invalid)
+- State mismatch and callback timeout handling
+- Callback port already in use
 - API client (mock API responses)
 - End-to-end command execution
 
@@ -702,3 +765,4 @@ Use `nfpm` or `fpm` to create `.rpm` packages for RedHat/CentOS/Fedora.
 For user-facing documentation, see:
 - **[CLI-DESIGN.md](./CLI-DESIGN.md)** - Command usage, workflows, and examples
 - **[API-REFERENCE.md](./API-REFERENCE.md)** - Zoom API details and OAuth implementation
+- **[MARKETPLACE.md](./MARKETPLACE.md)** - Zoom Marketplace setup and PKCE implementation notes

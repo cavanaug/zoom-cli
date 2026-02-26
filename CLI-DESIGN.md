@@ -336,11 +336,17 @@ zoom-cli auth login
 
 **Behavior**:
 1. Opens browser to Zoom OAuth authorization page
-2. Starts local callback server on `http://localhost:8080/callback`
-3. User authorizes the application
-4. Exchanges authorization code for access token + refresh token
-5. Stores tokens securely in `~/.config/zoom-cli/tokens.json` (0600 permissions)
-6. Displays success message with user info
+2. Generates PKCE and CSRF protection values (`code_verifier`, `code_challenge`, `state`)
+3. Selects first available configured callback URL and starts local callback server
+4. User authorizes the application
+5. Validates callback `state` and exchanges authorization code for access token + refresh token
+6. Stores tokens securely in `~/.config/zoom-cli/tokens.json` (0600 permissions)
+7. Displays success message with user info
+
+**Port behavior**:
+- Redirect URIs must match values configured in Zoom Marketplace.
+- `auth login` tries configured callback URLs in order and uses the first bindable port.
+- If all configured callback ports are in use, the command exits with an actionable error.
 
 #### `auth logout`
 Clear stored authentication tokens.
@@ -570,13 +576,29 @@ $XDG_CONFIG_HOME/zoom-cli/config.yaml
 
 ### Minimal Configuration
 
-Only OAuth credentials are required:
+Only OAuth client ID and redirect URL are required for PKCE-first setup:
+
+```yaml
+auth:
+  client_id: "your-zoom-client-id"
+  redirect_url: "http://localhost:53682/callback"
+  redirect_urls:
+    - "http://localhost:53682/callback"
+    - "http://localhost:53683/callback"
+    - "http://localhost:53684/callback"
+```
+
+If your specific app configuration requires confidential token exchange, include `client_secret`:
 
 ```yaml
 auth:
   client_id: "your-zoom-client-id"
   client_secret: "your-zoom-client-secret"
-  redirect_url: "http://localhost:8080/callback"
+  redirect_url: "http://localhost:53682/callback"
+  redirect_urls:
+    - "http://localhost:53682/callback"
+    - "http://localhost:53683/callback"
+    - "http://localhost:53684/callback"
 ```
 
 ### Full Configuration Example
@@ -585,8 +607,11 @@ auth:
 # OAuth Configuration (REQUIRED)
 auth:
   client_id: "your-zoom-client-id"
-  client_secret: "your-zoom-client-secret"
-  redirect_url: "http://localhost:8080/callback"
+  redirect_url: "http://localhost:53682/callback"
+  redirect_urls:                 # Optional callback fallback list
+    - "http://localhost:53682/callback"
+    - "http://localhost:53683/callback"
+    - "http://localhost:53684/callback"
 
 # Default Settings
 defaults:
@@ -634,8 +659,9 @@ advanced:
 | Key | Type | Description | Required |
 |-----|------|-------------|----------|
 | `client_id` | string | Zoom OAuth Client ID | Yes |
-| `client_secret` | string | Zoom OAuth Client Secret | Yes |
-| `redirect_url` | string | OAuth callback URL | Yes |
+| `client_secret` | string | Zoom OAuth Client Secret | No (only if app config requires confidential token exchange) |
+| `redirect_url` | string | Primary OAuth callback URL | Yes |
+| `redirect_urls` | array | Ordered fallback callback URLs | No |
 
 #### `defaults` (optional)
 
